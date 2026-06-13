@@ -4,6 +4,7 @@
 # 导入所有需要的库
 import os
 import json
+import re
 import time
 import shutil
 import socket
@@ -87,27 +88,34 @@ def load_or_generate_reality_keys(singbox_path):
             pass
 
     # 生成新密钥对
+    # sing-box 1.10.x 输出格式: "PrivateKey: xxx"（无空格）
+    # sing-box 1.9.x  输出格式: "Private key: xxx"（带空格）
+    # 下面用正则同时兼容两种格式
     try:
         result = subprocess.run(
             [str(singbox_path), 'generate', 'reality-keypair'],
             capture_output=True, text=True, check=True
         )
         private_key, public_key = None, None
-        for line in result.stdout.splitlines():
-            if "Private key" in line and ":" in line:
-                private_key = line.split(":", 1)[1].strip()
-            elif "Public key" in line and ":" in line:
-                public_key = line.split(":", 1)[1].strip()
+        # 正则匹配 "Private[ ]?Key" 和 "Public[ ]?Key"，不区分大小写
+        priv_match = re.search(r'private[\s_]?key\s*:\s*(\S+)', result.stdout, re.IGNORECASE)
+        pub_match = re.search(r'public[\s_]?key\s*:\s*(\S+)', result.stdout, re.IGNORECASE)
+        if priv_match:
+            private_key = priv_match.group(1).strip()
+        if pub_match:
+            public_key = pub_match.group(1).strip()
         if not private_key or not public_key:
             raise RuntimeError(f"无法解析密钥对输出: {result.stdout}")
 
-        # 生成短 ID
+        # 生成短 ID（输出为单行十六进制）
         sid_result = subprocess.run(
             [str(singbox_path), 'generate', 'reality-shortid'],
             capture_output=True, text=True, check=True
         )
-        short_id = sid_result.stdout.strip().split('\n')[0].strip()
-        if not short_id:
+        # 取第一个看起来像十六进制的 token
+        sid_match = re.search(r'\b([0-9a-fA-F]{8,32})\b', sid_result.stdout)
+        short_id = sid_match.group(1) if sid_match else sid_result.stdout.strip().split('\n')[0].strip()
+        if not short_id or len(short_id) < 4:
             raise RuntimeError(f"无法生成短 ID: {sid_result.stdout}")
     except Exception as e:
         raise RuntimeError(f"Reality 密钥生成失败: {e}")
