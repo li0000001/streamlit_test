@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# 导入所有需要的库
 import os
 import json
 import re
@@ -11,6 +10,7 @@ import socket
 import subprocess
 import platform
 import uuid
+import base64
 from pathlib import Path
 import urllib.request
 import urllib.parse
@@ -18,28 +18,13 @@ import tarfile
 import streamlit as st
 
 # --- 全局常量定义 ---
-# 工作目录，所有运行时文件都将存放在这里
 INSTALL_DIR = Path.home() / ".agsb"
-# 各种运行时文件的具体路径
 SB_PID_FILE = INSTALL_DIR / "sbpid.log"
+ARGO_PID_FILE = INSTALL_DIR / "sbargopid.log"
 LIST_FILE = INSTALL_DIR / "list.txt"
+LOG_FILE = INSTALL_DIR / "argo.log"
 SB_LOG_FILE = INSTALL_DIR / "sb.log"
 ALL_NODES_FILE = INSTALL_DIR / "allnodes.txt"
-REALITY_KEY_FILE = INSTALL_DIR / "reality_key.json"
-
-# Reality 默认配置
-DEFAULT_REALITY_SNI = "www.microsoft.com"  # 借用的大站（必须支持 TLS 1.3 + H2）
-DEFAULT_REALITY_PORT = 443  # sing-box 监听端口
-# 备选借用站点（用户可自选，TLS 1.3 + H2 即可）
-SNI_CHOICES = [
-    "www.microsoft.com",
-    "www.apple.com",
-    "www.cloudflare.com",
-    "gateway.icloud.com",
-    "www.samsung.com",
-    "www.mozilla.org",
-    "www.google.com",
-]
 
 # --- 辅助函数 ---
 
@@ -56,136 +41,47 @@ def download_file(url, target_path, silent=False):
         return False
 
 
-def get_external_ip(timeout=8):
-    """获取容器的外网 IP，用于客户端连接。"""
-    services = [
-        "https://api.ipify.org",
-        "https://ifconfig.me/ip",
-        "https://ipinfo.io/ip",
-        "https://checkip.amazonaws.com",
-    ]
-    for url in services:
-        try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'curl/7.88'})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                ip = resp.read().decode('utf-8').strip()
-            # 简单校验 IPv4
-            if ip and len(ip.split('.')) == 4:
-                return ip
-        except Exception:
-            continue
+def get_tunnel_domain(silent=False):
+    """从 cloudflared 日志中读取临时隧道域名。"""
+    for _ in range(20):  # 最多等 40 秒
+        if LOG_FILE.exists():
+            try:
+                content = LOG_FILE.read_text()
+                match = re.search(r'https://([a-zA-Z0-9.-]+\.trycloudflare\.com)', content)
+                if match:
+                    return match.group(1)
+            except Exception:
+                pass
+        time.sleep(2)
+    if not silent:
+        st.warning("未能从日志中获取隧道域名，请检查 .agsb/argo.log")
     return None
-
-
-def load_or_generate_reality_keys(singbox_path):
-    """加载已持久化的 Reality 密钥对和短 ID；如果没有则生成新的。"""
-    if REALITY_KEY_FILE.exists():
-        try:
-            data = json.loads(REALITY_KEY_FILE.read_text())
-            if data.get("private_key") and data.get("public_key") and data.get("short_id"):
-                # 验证 short_id 是合法的 16 位纯十六进制
-                sid = data["short_id"].lower()
-                if len(sid) == 16 and all(c in '0123456789abcdef' for c in sid):
-                    return data  # 字段完整且合法
-                # short_id 不合法（比如包含 base64 字符），需要重新生成
-        except Exception:
-            pass
-
-    # 生成新密钥对
-    # sing-box 1.10.x 输出格式: "PrivateKey: xxx"（无空格）
-    # sing-box 1.9.x  输出格式: "Private key: xxx"（带空格）
-    # 下面用正则同时兼容两种格式
-    try:
-        result = subprocess.run(
-            [str(singbox_path), 'generate', 'reality-keypair'],
-            capture_output=True, text=True, check=True
-        )
-        private_key, public_key = None, None
-        # 正则匹配 "Private[ ]?Key" 和 "Public[ ]?Key"，不区分大小写
-        priv_match = re.search(r'private[\s_]?key\s*:\s*(\S+)', result.stdout, re.IGNORECASE)
-        pub_match = re.search(r'public[\s_]?key\s*:\s*(\S+)', result.stdout, re.IGNORECASE)
-        if priv_match:
-            private_key = priv_match.group(1).strip()
-        if pub_match:
-            public_key = pub_match.group(1).strip()
-        if not private_key or not public_key:
-            raise RuntimeError(f"无法解析密钥对输出: {result.stdout}")
-
-        # 生成短 ID（严格要求：16 位纯十六进制）
-        short_id = None
-        try:
-            sid_result = subprocess.run(
-                [str(singbox_path), 'generate', 'reality-shortid'],
-                capture_output=True, text=True, check=True,
-                timeout=10
-            )
-            # 严格匹配 16 位十六进制字符
-            sid_match = re.search(r'\b([0-9a-fA-F]{16})\b', sid_result.stdout)
-            if sid_match:
-                short_id = sid_match.group(1).lower()
-        except Exception:
-            pass  # 下面会 fallback
-
-        # Fallback：用 Python 自己生成 16 位十六进制
-        if not short_id:
-            short_id = os.urandom(8).hex().lower()
-
-        # 最终验证
-        if len(short_id) != 16 or not all(c in '0123456789abcdef' for c in short_id):
-            raise RuntimeError(f"short_id 格式非法: {short_id!r}，必须是 16 位纯十六进制")
-    except Exception as e:
-        raise RuntimeError(f"Reality 密钥生成失败: {e}")
-
-    keys = {
-        "private_key": private_key,
-        "public_key": public_key,
-        "short_id": short_id,
-    }
-    REALITY_KEY_FILE.write_text(json.dumps(keys, indent=2))
-    return keys
-
-
-def generate_vless_reality_link(config):
-    """根据配置字典生成 VLESS Reality 链接字符串。"""
-    # 标准的 vless 链接格式: vless://uuid@host:port?params#name
-    params = {
-        "type": "tcp",
-        "security": "reality",
-        "flow": "xtls-rprx-vision",
-        "sni": config["sni"],
-        "fp": "chrome",          # 客户端 UA 指纹
-        "pbk": config["public_key"],
-        "sid": config["short_id"],
-    }
-    param_str = "&".join(
-        f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items()
-    )
-    name = urllib.parse.quote(config["ps"], safe='')
-    return f"vless://{config['uuid']}@{config['add']}:{config['port']}?{param_str}#{name}"
 
 
 def stop_services():
     """停止所有由本脚本启动的后台服务进程。"""
-    if SB_PID_FILE.exists():
-        try:
-            pid = int(SB_PID_FILE.read_text().strip())
-            os.kill(pid, 9)  # 强制终止进程
-        except (ValueError, ProcessLookupError, FileNotFoundError, PermissionError):
-            pass
-        finally:
-            SB_PID_FILE.unlink(missing_ok=True)
-    # 保险措施：按名字查找并杀死残留进程
+    for pid_file in [SB_PID_FILE, ARGO_PID_FILE]:
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text().strip())
+                os.kill(pid, 9)
+            except (ValueError, ProcessLookupError, FileNotFoundError, PermissionError):
+                pass
+            finally:
+                pid_file.unlink(missing_ok=True)
     subprocess.run("pkill -9 -f 'sing-box run'", shell=True, capture_output=True)
+    subprocess.run("pkill -9 -f 'cloudflared tunnel'", shell=True, capture_output=True)
 
 
 def is_service_running():
-    """通过检查 PID 文件和进程是否存在，来判断核心服务是否在运行。"""
-    if not SB_PID_FILE.exists():
+    """检查核心服务是否在运行。"""
+    if not SB_PID_FILE.exists() or not ARGO_PID_FILE.exists():
         return False
     try:
         sb_pid = int(SB_PID_FILE.read_text().strip())
-        # os.kill(pid, 0) 不会杀死进程，而是检查进程是否存在
+        argo_pid = int(ARGO_PID_FILE.read_text().strip())
         os.kill(sb_pid, 0)
+        os.kill(argo_pid, 0)
         return True
     except (ValueError, ProcessLookupError, FileNotFoundError, PermissionError):
         return False
@@ -193,69 +89,64 @@ def is_service_running():
 
 # --- 核心逻辑 ---
 
-def generate_all_configs(uuid_str, port, reality_keys, sni, external_ip):
-    """生成所有节点链接和配置文件，并返回用于 UI 显示的文本。"""
+def generate_all_configs(domain, uuid_str, port):
+    """生成所有节点链接。"""
     hostname = socket.gethostname()[:10]
-
-    # 优选 IP 段（不同端口的 Cloudflare CDN 节点）
-    # 客户端可以挑延迟最低的用
-    cf_endpoints = {
-        "104.16.0.0": 443,
-        "104.17.0.0": 8443,
-        "104.18.0.0": 2053,
-        "104.19.0.0": 2083,
-        "104.20.0.0": 2087,
-        "162.159.0.0": 443,
-        "172.64.0.0": 443,
-        "188.114.96.0": 443,
-    }
-
-    base_config = {
-        "uuid": uuid_str,
-        "public_key": reality_keys["public_key"],
-        "short_id": reality_keys["short_id"],
-        "sni": sni,
-    }
-
     all_links = []
+
+    base = {
+        "uuid": uuid_str,
+        "domain": domain,
+    }
+
+    # Cloudflare 优选 IP + 端口（走 Cloudflare CDN）
+    cf_endpoints = {
+        "104.16.0.0": "443",
+        "104.17.0.0": "8443",
+        "104.18.0.0": "2053",
+        "104.19.0.0": "2083",
+        "104.20.0.0": "2087",
+        "162.159.0.0": "443",
+        "172.64.0.0": "443",
+        "188.114.96.0": "443",
+    }
+
     for ip, p in cf_endpoints.items():
-        all_links.append(generate_vless_reality_link({
-            **base_config,
-            "ps": f"VL-REALITY-{hostname}-{ip.split('.')[2]}-{p}",
+        all_links.append(generate_vmess_link({
+            "ps": f"VL-WS-{hostname}-{ip.split('.')[2]}-{p}",
             "add": ip,
             "port": p,
+            "id": uuid_str,
+            "host": domain,
+            "sni": domain,
         }))
 
-    # 真实直连节点（用容器外网 IP 和默认端口）
-    if external_ip:
-        all_links.append(generate_vless_reality_link({
-            **base_config,
-            "ps": f"VL-REALITY-Direct-{hostname}",
-            "add": external_ip,
-            "port": port,
-        }))
+    # 直连节点（直接用隧道域名）
+    all_links.append(generate_vmess_link({
+        "ps": f"VL-WS-Direct-{hostname}",
+        "add": domain,
+        "port": "443",
+        "id": uuid_str,
+        "host": domain,
+        "sni": domain,
+    }))
 
-    # 写入纯链接文件
     ALL_NODES_FILE.write_text("\n".join(all_links) + "\n")
 
-    # 准备 UI 显示文本
-    list_output_text = f"""✅ **VLESS + Reality 服务已启动**
+    list_output_text = f"""✅ **VLESS + WebSocket + TLS 服务已启动**
 ---
-- **容器外网 IP:** `{external_ip or '未能获取'}`
+- **隧道域名:** `{domain}`
 - **UUID:** `{uuid_str}`
-- **sing-box 监听端口:** `{port}`
-- **Reality SNI (借用站):** `{sni}`
-- **公钥 (pbk):** `{reality_keys['public_key']}`
-- **短 ID (sid):** `{reality_keys['short_id']}`
-- **流控 (flow):** `xtls-rprx-vision`
+- **本地端口:** `{port}`
+- **WebSocket 路径:** `/`
+- **TLS:** Cloudflare 提供（无需证书）
 ---
 **使用提示**：
-- 推荐优先使用 "Direct" 节点（延迟最低）
-- 如果 Direct 不通，依次尝试优选 IP 节点
-- 客户端需开启 TLS 指纹模拟（`fp=chrome`），大多数现代客户端默认支持
-- ⚠️ Streamlit Cloud 容器重启后 IP 可能变化，请重新打开本页面刷新
+- 推荐优先使用 "Direct" 节点（走 Cloudflare 隧道直连）
+- 如果 Direct 不通，尝试优选 IP 节点
+- 容器重启后隧道域名会变，请重新打开页面刷新
 ---
-**VLESS Reality 链接 (可复制):**
+**Vmess 链接 (可复制):**
 
 """ + "\n".join(all_links)
 
@@ -263,9 +154,30 @@ def generate_all_configs(uuid_str, port, reality_keys, sni, external_ip):
     return list_output_text
 
 
-def start_services(uuid_str, port, sni, silent=False):
-    """核心函数：安装并启动 sing-box (VLESS + Reality)，可选择静默模式。"""
+def generate_vmess_link(config):
+    """生成 Vmess 链接字符串。"""
+    vmess_obj = {
+        "v": "2",
+        "ps": config.get("ps"),
+        "add": config.get("add"),
+        "port": str(config.get("port")),
+        "id": config.get("id"),
+        "aid": "0",
+        "scy": "auto",
+        "net": "ws",
+        "type": "none",
+        "host": config.get("host"),
+        "path": "/",
+        "tls": "tls",
+        "sni": config.get("sni"),
+    }
+    vmess_str = json.dumps(vmess_obj, separators=(',', ':'))
+    encoded = base64.b64encode(vmess_str.encode('utf-8')).decode('utf-8').rstrip('=')
+    return f"vmess://{encoded}"
 
+
+def start_services(uuid_str, port, silent=False):
+    """核心函数：安装并启动 sing-box + cloudflared。"""
     if not silent:
         st.info("🔄 正在启动/重启服务...")
 
@@ -275,33 +187,38 @@ def start_services(uuid_str, port, sni, silent=False):
         INSTALL_DIR.mkdir(parents=True, exist_ok=True)
 
         uuid_str = uuid_str or str(uuid.uuid4())
-        port = int(port) if port else DEFAULT_REALITY_PORT
+        port = int(port) if port else 10000
         if port < 1 or port > 65535:
-            port = DEFAULT_REALITY_PORT
-        sni = sni or DEFAULT_REALITY_SNI
+            port = 10000
 
-        # 定义依赖路径
         arch = "amd64" if "x86_64" in platform.machine().lower() else "arm64"
         singbox_path = INSTALL_DIR / "sing-box"
+        cloudflared_path = INSTALL_DIR / "cloudflared"
 
         def install_dependencies():
             if not singbox_path.exists():
-                # 使用 sing-box 1.8+ 稳定版（Reality 协议 1.8 起 GA）
                 sb_version = "1.10.2"
-                sb_name_actual = f"sing-box-{sb_version}-linux-{arch}"
+                sb_name = f"sing-box-{sb_version}-linux-{arch}"
                 tar_path = INSTALL_DIR / "sing-box.tar.gz"
-                url = f"https://github.com/SagerNet/sing-box/releases/download/v{sb_version}/{sb_name_actual}.tar.gz"
+                url = f"https://github.com/SagerNet/sing-box/releases/download/v{sb_version}/{sb_name}.tar.gz"
                 if not download_file(url, tar_path, silent):
                     return False, f"sing-box 下载失败: {url}"
                 try:
                     with tarfile.open(tar_path, "r:gz") as tar:
                         tar.extractall(path=INSTALL_DIR)
-                    shutil.move(INSTALL_DIR / sb_name_actual / "sing-box", singbox_path)
-                    shutil.rmtree(INSTALL_DIR / sb_name_actual)
+                    shutil.move(INSTALL_DIR / sb_name / "sing-box", singbox_path)
+                    shutil.rmtree(INSTALL_DIR / sb_name)
                     tar_path.unlink()
                     os.chmod(singbox_path, 0o755)
                 except Exception as e:
                     return False, f"sing-box 解压失败: {e}"
+
+            if not cloudflared_path.exists():
+                cf_arch = "amd64" if arch == "amd64" else "arm"
+                url = f"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{cf_arch}"
+                if not download_file(url, cloudflared_path, silent):
+                    return False, f"cloudflared 下载失败: {url}"
+                os.chmod(cloudflared_path, 0o755)
             return True, ""
 
         if silent:
@@ -309,47 +226,28 @@ def start_services(uuid_str, port, sni, silent=False):
             if not success:
                 return False, msg
         else:
-            with st.spinner("正在检查并安装依赖 (sing-box)..."):
+            with st.spinner("正在检查并安装依赖 (sing-box, cloudflared)..."):
                 success, msg = install_dependencies()
                 if not success:
                     return False, msg
 
-        # 加载或生成 Reality 密钥
-        if not silent:
-            with st.spinner("正在加载 Reality 密钥..."):
-                reality_keys = load_or_generate_reality_keys(singbox_path)
-        else:
-            reality_keys = load_or_generate_reality_keys(singbox_path)
-
-        # 生成 sing-box 配置（VLESS + Reality）
+        # 创建 sing-box 配置 (VLESS + WebSocket)
         sb_config = {
-            "log": {"level": "info", "output": "sb.log"},
+            "log": {"level": "info"},
             "inbounds": [
                 {
                     "type": "vless",
                     "tag": "vless-in",
-                    "listen": "0.0.0.0",
+                    "listen": "127.0.0.1",
                     "listen_port": port,
                     "users": [
                         {
                             "uuid": uuid_str,
-                            "flow": "xtls-rprx-vision",
                         }
                     ],
-                    "tls": {
-                        "enabled": True,
-                        "server_name": sni,
-                        "reality": {
-                            "enabled": True,
-                            "private_key": reality_keys["private_key"],
-                            "short_id": [reality_keys["short_id"]],
-                            # sing-box 1.10.x 改动：原来的 "dest": "host:port"
-                            # 拆成了 "handshake": {"server": "host", "server_port": 443}
-                            "handshake": {
-                                "server": sni,
-                                "server_port": 443,
-                            },
-                        },
+                    "transport": {
+                        "type": "ws",
+                        "path": "/",
                     },
                 }
             ],
@@ -360,63 +258,40 @@ def start_services(uuid_str, port, sni, silent=False):
         }
         (INSTALL_DIR / "sb.json").write_text(json.dumps(sb_config, indent=2))
 
-        # 尝试启动 sing-box，带端口降级
-        # Streamlit Cloud 容器通常以非 root 运行，bind 443 可能失败
-        candidate_ports = [port, 2053, 2083, 2087, 8443, 2096]
-        # 去重并保持顺序
-        seen = set()
-        candidate_ports = [p for p in candidate_ports if not (p in seen or seen.add(p))]
+        # 启动 sing-box
+        with open(SB_LOG_FILE, "w") as sb_log:
+            sb_proc = subprocess.Popen(
+                [str(singbox_path), "run", "-c", "sb.json"],
+                cwd=INSTALL_DIR,
+                stdout=sb_log,
+                stderr=subprocess.STDOUT,
+            )
+        SB_PID_FILE.write_text(str(sb_proc.pid))
 
-        sb_process = None
-        actual_port = None
-        last_error = ""
-        for try_port in candidate_ports:
-            sb_config["inbounds"][0]["listen_port"] = try_port
-            (INSTALL_DIR / "sb.json").write_text(json.dumps(sb_config, indent=2))
-            with open(SB_LOG_FILE, "w") as sb_log:
-                proc = subprocess.Popen(
-                    [str(singbox_path), "run", "-c", "sb.json"],
-                    cwd=INSTALL_DIR,
-                    stdout=sb_log,
-                    stderr=subprocess.STDOUT,
-                )
-            # 等 2.5 秒给 sing-box 足够时间启动（Reality 初始化比裸 TCP 慢）
-            time.sleep(2.5)
-            # 检查进程是否还活着（bind 失败会立即退出，pid 文件会被 unlinked）
-            if proc.poll() is None:
-                sb_process = proc
-                actual_port = try_port
-                break
-            else:
-                # 进程已退出，读取日志看原因
-                err_log = SB_LOG_FILE.read_text() if SB_LOG_FILE.exists() else ""
-                last_error = f"端口 {try_port}: {err_log.strip()[:500]}"
-                if not silent:
-                    st.warning(last_error)
+        # 启动 cloudflared 临时隧道
+        with open(LOG_FILE, "w") as cf_log:
+            cf_cmd = [
+                str(cloudflared_path), "tunnel", "--no-autoupdate",
+                "--url", f"http://127.0.0.1:{port}",
+                "--protocol", "http2",
+            ]
+            cf_proc = subprocess.Popen(
+                cf_cmd, cwd=INSTALL_DIR,
+                stdout=cf_log, stderr=subprocess.STDOUT,
+            )
+        ARGO_PID_FILE.write_text(str(cf_proc.pid))
 
-        if sb_process is None:
-            return False, f"所有候选端口均启动失败。最后错误:\n{last_error or '未知'}"
-
-        port = actual_port
-        SB_PID_FILE.write_text(str(sb_process.pid))
-
-        # 获取外网 IP
+        # 获取隧道域名
         if not silent:
-            with st.spinner("正在获取容器外网 IP..."):
-                external_ip = get_external_ip()
+            with st.spinner("正在等待 cloudflared 隧道建立..."):
+                domain = get_tunnel_domain(silent=True)
         else:
-            external_ip = get_external_ip()
+            domain = get_tunnel_domain(silent=True)
 
-        # 写 UUID / 端口 / SNI 到 secrets 文件，方便后续读取
-        meta = {
-            "uuid": uuid_str,
-            "port": port,
-            "sni": sni,
-            "external_ip": external_ip,
-        }
-        (INSTALL_DIR / "meta.json").write_text(json.dumps(meta, indent=2))
+        if not domain:
+            return False, "未能获取隧道域名。请检查日志 (.agsb/argo.log)。"
 
-        links_output = generate_all_configs(uuid_str, port, reality_keys, sni, external_ip)
+        links_output = generate_all_configs(domain, uuid_str, port)
         return True, links_output
 
     except Exception as e:
@@ -437,17 +312,14 @@ def uninstall_services():
 def render_main_ui(config):
     """渲染主控制面板。"""
     st.set_page_config(page_title="部署工具", layout="wide")
-    st.header("⚙️ 服务管理面板 (VLESS + Reality)")
+    st.header("⚙️ 服务管理面板 (VLESS + WS + TLS)")
 
     st.subheader("控制操作")
     c1, c2, c3 = st.columns(3)
 
     if c1.button("🚀 强制重启服务", type="primary", use_container_width=True):
         success, message = start_services(
-            config["uuid_str"],
-            config["port"],
-            config["reality_sni"],
-            silent=False,
+            config["uuid_str"], config["port"], silent=False,
         )
         if success:
             st.session_state.output = message
@@ -468,7 +340,6 @@ def render_main_ui(config):
             st.session_state.output = "节点信息文件不存在，请先启动服务。"
         st.rerun()
 
-    # 优先从会话状态读取输出，否则从文件读取
     output_to_show = st.session_state.get('output', '')
     if not output_to_show and LIST_FILE.exists():
         output_to_show = LIST_FILE.read_text()
@@ -494,7 +365,7 @@ def render_login_ui(secret_key):
 
 
 def main():
-    """主应用逻辑：先执行后台自愈，再根据登录状态渲染 UI。"""
+    """主应用逻辑。"""
     st.session_state.setdefault('authenticated', False)
     st.session_state.setdefault('output', "")
 
@@ -502,25 +373,18 @@ def main():
         secret_key = st.secrets["SECRET_KEY"]
         config = {
             "uuid_str": st.secrets.get("UUID_STR", ""),
-            "port": int(st.secrets.get("PORT_VM_WS", DEFAULT_REALITY_PORT)),
-            "reality_sni": st.secrets.get("REALITY_SNI", DEFAULT_REALITY_SNI),
+            "port": int(st.secrets.get("PORT_VM_WS", 10000)),
         }
     except KeyError:
         st.error("严重错误：未在 Secrets 中找到 'SECRET_KEY'。")
         st.info("请确保您已在 Streamlit Cloud 的设置中添加了名为 'SECRET_KEY' 的密钥。")
         return
 
-    # --- 核心自愈逻辑 ---
-    # 在渲染任何 UI 之前，先检查服务状态。如果服务未运行，就以静默模式启动。
+    # 核心自愈逻辑
     if not is_service_running():
-        start_services(
-            config["uuid_str"],
-            config["port"],
-            config["reality_sni"],
-            silent=True,
-        )
+        start_services(config["uuid_str"], config["port"], silent=True)
 
-    # --- UI 渲染逻辑 ---
+    # UI 渲染
     if st.session_state.authenticated:
         render_main_ui(config)
     else:
