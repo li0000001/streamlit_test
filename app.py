@@ -327,9 +327,12 @@ def start_services(uuid_str, port, sni, silent=False):
                             "enabled": True,
                             "private_key": reality_keys["private_key"],
                             "short_id": [reality_keys["short_id"]],
-                            # dest 必需：未识别连接转发到哪个伪装 HTTPS 站点
-                            # 必须与 server_name 保持一致，且该站点必须支持 TLS 1.3
-                            "dest": f"{sni}:443",
+                            # sing-box 1.10.x 改动：原来的 "dest": "host:port"
+                            # 拆成了 "handshake": {"server": "host", "server_port": 443}
+                            "handshake": {
+                                "server": sni,
+                                "server_port": 443,
+                            },
                         },
                     },
                 }
