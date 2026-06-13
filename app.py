@@ -88,37 +88,33 @@ def is_service_running():
 
 # --- 核心逻辑 ---
 
-def generate_all_configs(domain, uuid_str, port):
+def generate_all_configs(domain, uuid_str, port, is_named_tunnel=False):
     """生成所有节点链接。"""
     hostname = socket.gethostname()[:10]
     all_links = []
 
-    base = {
-        "uuid": uuid_str,
-        "domain": domain,
-    }
-
-    # Cloudflare 优选 IP + 端口（走 Cloudflare CDN）
-    cf_endpoints = {
-        "104.16.0.0": "443",
-        "104.17.0.0": "8443",
-        "104.18.0.0": "2053",
-        "104.19.0.0": "2083",
-        "104.20.0.0": "2087",
-        "162.159.0.0": "443",
-        "172.64.0.0": "443",
-        "188.114.96.0": "443",
-    }
-
-    for ip, p in cf_endpoints.items():
-        all_links.append(generate_vless_link({
-            "ps": f"VL-WS-{hostname}-{ip.split('.')[2]}-{p}",
-            "add": ip,
-            "port": p,
-            "id": uuid_str,
-            "host": domain,
-            "sni": domain,
-        }))
+    if is_named_tunnel:
+        # 命名隧道：域名固定，只生成直连 + 优选 IP 节点
+        # Cloudflare 优选 IP（走 CDN）
+        cf_endpoints = {
+            "104.16.0.0": "443",
+            "104.17.0.0": "8443",
+            "104.18.0.0": "2053",
+            "104.19.0.0": "2083",
+            "104.20.0.0": "2087",
+            "162.159.0.0": "443",
+            "172.64.0.0": "443",
+            "188.114.96.0": "443",
+        }
+        for ip, p in cf_endpoints.items():
+            all_links.append(generate_vless_link({
+                "ps": f"VL-WS-{hostname}-{ip.split('.')[2]}-{p}",
+                "add": ip,
+                "port": p,
+                "id": uuid_str,
+                "host": domain,
+                "sni": domain,
+            }))
 
     # 直连节点（直接用隧道域名）
     all_links.append(generate_vless_link({
@@ -132,8 +128,10 @@ def generate_all_configs(domain, uuid_str, port):
 
     ALL_NODES_FILE.write_text("\n".join(all_links) + "\n")
 
+    tunnel_type = "命名隧道 (Named)" if is_named_tunnel else "临时隧道 (Quick)"
     list_output_text = f"""✅ **VLESS + WebSocket + TLS 服务已启动**
 ---
+- **隧道类型:** `{tunnel_type}`
 - **隧道域名:** `{domain}`
 - **UUID:** `{uuid_str}`
 - **本地端口:** `{port}`
@@ -142,8 +140,7 @@ def generate_all_configs(domain, uuid_str, port):
 ---
 **使用提示**：
 - 推荐优先使用 "Direct" 节点（走 Cloudflare 隧道直连）
-- 如果 Direct 不通，尝试优选 IP 节点
-- 容器重启后隧道域名会变，请重新打开页面刷新
+{"- 命名隧道无带宽限制，可正常观看 YouTube" if is_named_tunnel else "- ⚠️ 临时隧道有带宽限制，YouTube 未登录可能无法播放"}
 ---
 **VLESS 链接 (可复制):**
 
@@ -170,12 +167,14 @@ def generate_vless_link(config):
     return f"vless://{config['id']}@{config['add']}:{config['port']}?{param_str}#{name}"
 
 
-def start_services(uuid_str, port, silent=False):
+def start_services(uuid_str, port, argo_token="", custom_domain="", silent=False):
     """核心函数：安装并启动 sing-box + cloudflared。"""
     if not silent:
         st.info("🔄 正在启动/重启服务...")
 
     stop_services()
+
+    is_named_tunnel = bool(argo_token and custom_domain)
 
     try:
         INSTALL_DIR.mkdir(parents=True, exist_ok=True)
@@ -262,13 +261,21 @@ def start_services(uuid_str, port, silent=False):
             )
         SB_PID_FILE.write_text(str(sb_proc.pid))
 
-        # 启动 cloudflared 临时隧道
+        # 启动 cloudflared
         with open(LOG_FILE, "w") as cf_log:
-            cf_cmd = [
-                str(cloudflared_path), "tunnel", "--no-autoupdate",
-                "--url", f"http://127.0.0.1:{port}",
-                "--protocol", "http2",
-            ]
+            if is_named_tunnel:
+                # 命名隧道：使用 Token 连接
+                cf_cmd = [
+                    str(cloudflared_path), "tunnel", "--no-autoupdate",
+                    "run", "--token", argo_token,
+                ]
+            else:
+                # 临时隧道
+                cf_cmd = [
+                    str(cloudflared_path), "tunnel", "--no-autoupdate",
+                    "--url", f"http://127.0.0.1:{port}",
+                    "--protocol", "http2",
+                ]
             cf_proc = subprocess.Popen(
                 cf_cmd, cwd=INSTALL_DIR,
                 stdout=cf_log, stderr=subprocess.STDOUT,
@@ -276,16 +283,19 @@ def start_services(uuid_str, port, silent=False):
         ARGO_PID_FILE.write_text(str(cf_proc.pid))
 
         # 获取隧道域名
-        if not silent:
-            with st.spinner("正在等待 cloudflared 隧道建立..."):
-                domain = get_tunnel_domain(silent=True)
+        if is_named_tunnel:
+            domain = custom_domain
         else:
-            domain = get_tunnel_domain(silent=True)
+            if not silent:
+                with st.spinner("正在等待 cloudflared 隧道建立..."):
+                    domain = get_tunnel_domain(silent=True)
+            else:
+                domain = get_tunnel_domain(silent=True)
 
         if not domain:
             return False, "未能获取隧道域名。请检查日志 (.agsb/argo.log)。"
 
-        links_output = generate_all_configs(domain, uuid_str, port)
+        links_output = generate_all_configs(domain, uuid_str, port, is_named_tunnel)
         return True, links_output
 
     except Exception as e:
@@ -313,7 +323,9 @@ def render_main_ui(config):
 
     if c1.button("🚀 强制重启服务", type="primary", use_container_width=True):
         success, message = start_services(
-            config["uuid_str"], config["port"], silent=False,
+            config["uuid_str"], config["port"],
+            config["argo_token"], config["custom_domain"],
+            silent=False,
         )
         if success:
             st.session_state.output = message
@@ -368,6 +380,8 @@ def main():
         config = {
             "uuid_str": st.secrets.get("UUID_STR", ""),
             "port": int(st.secrets.get("PORT_VM_WS", 10000)),
+            "argo_token": st.secrets.get("ARGO_TOKEN", ""),
+            "custom_domain": st.secrets.get("CUSTOM_DOMAIN", ""),
         }
     except KeyError:
         st.error("严重错误：未在 Secrets 中找到 'SECRET_KEY'。")
@@ -376,7 +390,11 @@ def main():
 
     # 核心自愈逻辑
     if not is_service_running():
-        start_services(config["uuid_str"], config["port"], silent=True)
+        start_services(
+            config["uuid_str"], config["port"],
+            config["argo_token"], config["custom_domain"],
+            silent=True,
+        )
 
     # UI 渲染
     if st.session_state.authenticated:
