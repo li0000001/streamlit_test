@@ -10,7 +10,6 @@ import socket
 import subprocess
 import platform
 import uuid
-import base64
 from pathlib import Path
 import urllib.request
 import urllib.parse
@@ -112,7 +111,7 @@ def generate_all_configs(domain, uuid_str, port):
     }
 
     for ip, p in cf_endpoints.items():
-        all_links.append(generate_vmess_link({
+        all_links.append(generate_vless_link({
             "ps": f"VL-WS-{hostname}-{ip.split('.')[2]}-{p}",
             "add": ip,
             "port": p,
@@ -122,7 +121,7 @@ def generate_all_configs(domain, uuid_str, port):
         }))
 
     # 直连节点（直接用隧道域名）
-    all_links.append(generate_vmess_link({
+    all_links.append(generate_vless_link({
         "ps": f"VL-WS-Direct-{hostname}",
         "add": domain,
         "port": "443",
@@ -146,7 +145,7 @@ def generate_all_configs(domain, uuid_str, port):
 - 如果 Direct 不通，尝试优选 IP 节点
 - 容器重启后隧道域名会变，请重新打开页面刷新
 ---
-**Vmess 链接 (可复制):**
+**VLESS 链接 (可复制):**
 
 """ + "\n".join(all_links)
 
@@ -154,26 +153,21 @@ def generate_all_configs(domain, uuid_str, port):
     return list_output_text
 
 
-def generate_vmess_link(config):
-    """生成 Vmess 链接字符串。"""
-    vmess_obj = {
-        "v": "2",
-        "ps": config.get("ps"),
-        "add": config.get("add"),
-        "port": str(config.get("port")),
-        "id": config.get("id"),
-        "aid": "0",
-        "scy": "auto",
-        "net": "ws",
-        "type": "none",
-        "host": config.get("host"),
+def generate_vless_link(config):
+    """生成 VLESS + WebSocket + TLS 链接字符串。"""
+    # 格式: vless://UUID@HOST:PORT?params#NAME
+    params = {
+        "type": "ws",
+        "security": "tls",
         "path": "/",
-        "tls": "tls",
+        "host": config.get("host"),
         "sni": config.get("sni"),
     }
-    vmess_str = json.dumps(vmess_obj, separators=(',', ':'))
-    encoded = base64.b64encode(vmess_str.encode('utf-8')).decode('utf-8').rstrip('=')
-    return f"vmess://{encoded}"
+    param_str = "&".join(
+        f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in params.items()
+    )
+    name = urllib.parse.quote(config["ps"], safe='')
+    return f"vless://{config['id']}@{config['add']}:{config['port']}?{param_str}#{name}"
 
 
 def start_services(uuid_str, port, silent=False):
