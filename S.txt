@@ -1,0 +1,29 @@
+# 这是进入后台管理页面的密码，请务必修改成一个复杂的密码！
+SECRET_KEY = "your_secret_password_here"
+
+# --- 以下为可选配置，如果留空，脚本会自动使用默认值 ---
+
+# 你可以指定一个固定的UUID，否则会随机生成（且每次容器重启都会变）
+# UUID_STR = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+# sing-box 本地监听端口（默认 10000，cloudflared 会转发到这个端口）
+# PORT_VM_WS = 10000
+
+# --- Cloudflare 命名隧道配置（推荐，解决 YouTube 限流）---
+# 如果你想用自己的 Cloudflare 账号创建命名隧道（无带宽限制），
+# 请配置以下两项：
+
+# 1. 在 Cloudflare Zero Trust Dashboard 创建隧道后获取的 Token
+# ARGO_TOKEN = "eyJhIjoi..." (很长的 base64 字符串)
+
+# 2. 你在 Cloudflare DNS 里给隧道配置的域名
+# 例如你在 Cloudflare 里把 proxy.yourdomain.com 指向隧道
+# CUSTOM_DOMAIN = "proxy.yourdomain.com"
+
+# 不配置 ARGO_TOKEN 则使用临时隧道（trycloudflare.com），
+# 临时隧道有带宽限制，YouTube 未登录时可能无法播放视频。
+
+------------------------------------------
+设置 GitHub Actions (这是实现自动化的关键)：
+在您的 GitHub 项目仓库中，创建文件 .github/workflows/wakeup.yml。
+将以下代码粘贴进去，并将 URL 替换成您自己的 Streamlit 应用 URL。
