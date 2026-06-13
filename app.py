@@ -327,6 +327,9 @@ def start_services(uuid_str, port, sni, silent=False):
                             "enabled": True,
                             "private_key": reality_keys["private_key"],
                             "short_id": [reality_keys["short_id"]],
+                            # dest 必需：未识别连接转发到哪个伪装 HTTPS 站点
+                            # 必须与 server_name 保持一致，且该站点必须支持 TLS 1.3
+                            "dest": f"{sni}:443",
                         },
                     },
                 }
@@ -347,6 +350,7 @@ def start_services(uuid_str, port, sni, silent=False):
 
         sb_process = None
         actual_port = None
+        last_error = ""
         for try_port in candidate_ports:
             sb_config["inbounds"][0]["listen_port"] = try_port
             (INSTALL_DIR / "sb.json").write_text(json.dumps(sb_config, indent=2))
@@ -357,7 +361,8 @@ def start_services(uuid_str, port, sni, silent=False):
                     stdout=sb_log,
                     stderr=subprocess.STDOUT,
                 )
-            time.sleep(1.5)
+            # 等 2.5 秒给 sing-box 足够时间启动（Reality 初始化比裸 TCP 慢）
+            time.sleep(2.5)
             # 检查进程是否还活着（bind 失败会立即退出，pid 文件会被 unlinked）
             if proc.poll() is None:
                 sb_process = proc
@@ -365,12 +370,13 @@ def start_services(uuid_str, port, sni, silent=False):
                 break
             else:
                 # 进程已退出，读取日志看原因
+                err_log = SB_LOG_FILE.read_text() if SB_LOG_FILE.exists() else ""
+                last_error = f"端口 {try_port}: {err_log.strip()[:500]}"
                 if not silent:
-                    err_log = SB_LOG_FILE.read_text() if SB_LOG_FILE.exists() else ""
-                    st.warning(f"端口 {try_port} 启动失败，尝试下一个... 错误: {err_log[:200]}")
+                    st.warning(last_error)
 
         if sb_process is None:
-            return False, f"所有候选端口均启动失败，请检查日志: {SB_LOG_FILE}"
+            return False, f"所有候选端口均启动失败。最后错误:\n{last_error or '未知'}"
 
         port = actual_port
         SB_PID_FILE.write_text(str(sb_process.pid))
