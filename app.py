@@ -321,10 +321,10 @@ def start_services(uuid_str, port, sni, silent=False):
                         }
                     ],
                     "tls": {
-                        "enabled": true,
+                        "enabled": True,
                         "server_name": sni,
                         "reality": {
-                            "enabled": true,
+                            "enabled": True,
                             "private_key": reality_keys["private_key"],
                             "short_id": [reality_keys["short_id"]],
                         },
