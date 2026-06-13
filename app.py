@@ -83,7 +83,11 @@ def load_or_generate_reality_keys(singbox_path):
         try:
             data = json.loads(REALITY_KEY_FILE.read_text())
             if data.get("private_key") and data.get("public_key") and data.get("short_id"):
-                return data
+                # 验证 short_id 是合法的 16 位纯十六进制
+                sid = data["short_id"].lower()
+                if len(sid) == 16 and all(c in '0123456789abcdef' for c in sid):
+                    return data  # 字段完整且合法
+                # short_id 不合法（比如包含 base64 字符），需要重新生成
         except Exception:
             pass
 
@@ -107,16 +111,28 @@ def load_or_generate_reality_keys(singbox_path):
         if not private_key or not public_key:
             raise RuntimeError(f"无法解析密钥对输出: {result.stdout}")
 
-        # 生成短 ID（输出为单行十六进制）
-        sid_result = subprocess.run(
-            [str(singbox_path), 'generate', 'reality-shortid'],
-            capture_output=True, text=True, check=True
-        )
-        # 取第一个看起来像十六进制的 token
-        sid_match = re.search(r'\b([0-9a-fA-F]{8,32})\b', sid_result.stdout)
-        short_id = sid_match.group(1) if sid_match else sid_result.stdout.strip().split('\n')[0].strip()
-        if not short_id or len(short_id) < 4:
-            raise RuntimeError(f"无法生成短 ID: {sid_result.stdout}")
+        # 生成短 ID（严格要求：16 位纯十六进制）
+        short_id = None
+        try:
+            sid_result = subprocess.run(
+                [str(singbox_path), 'generate', 'reality-shortid'],
+                capture_output=True, text=True, check=True,
+                timeout=10
+            )
+            # 严格匹配 16 位十六进制字符
+            sid_match = re.search(r'\b([0-9a-fA-F]{16})\b', sid_result.stdout)
+            if sid_match:
+                short_id = sid_match.group(1).lower()
+        except Exception:
+            pass  # 下面会 fallback
+
+        # Fallback：用 Python 自己生成 16 位十六进制
+        if not short_id:
+            short_id = os.urandom(8).hex().lower()
+
+        # 最终验证
+        if len(short_id) != 16 or not all(c in '0123456789abcdef' for c in short_id):
+            raise RuntimeError(f"short_id 格式非法: {short_id!r}，必须是 16 位纯十六进制")
     except Exception as e:
         raise RuntimeError(f"Reality 密钥生成失败: {e}")
 
