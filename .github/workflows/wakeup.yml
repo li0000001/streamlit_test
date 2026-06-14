@@ -1,0 +1,38 @@
+name: Wake Up Streamlit Apps
+
+on:
+  schedule:
+    # 每4小时运行一次 (0:00, 4:00, 8:00, 12:00, 16:00, 20:00)
+    - cron: '0 */4 * * *'
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  wake_up:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10  # 单个 job 最多运行 10 分钟
+    # 并行唤醒多个应用，一个失败不影响其他
+    strategy:
+      fail-fast: false
+      matrix:
+        url:
+          - "https://app-server-91132132.streamlit.app"
+          # 添加更多应用，每行一个：
+           - "https://apptest-2osmliaqb4a5skcpnyxlgx.streamlit.app"
+          # - "https://your-third-app.streamlit.app"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Playwright
+        run: pip install playwright
+
+      - name: Install browser binaries
+        run: playwright install --with-deps
+
+      - name: Wake up ${{ matrix.url }}
+        run: python wakeup_script.py "${{ matrix.url }}"
