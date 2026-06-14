@@ -9,6 +9,8 @@ jobs:
   wake_up:
     runs-on: ubuntu-latest
     timeout-minutes: 10 
+        env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
       fail-fast: false
       matrix:
