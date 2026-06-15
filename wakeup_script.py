@@ -1,4 +1,7 @@
 # wakeup_script.py
+# Two modes:
+# 1. App is running -> just visit and keep alive
+# 2. App is sleeping -> wait for wake button, click it, wait for app to load
 import sys
 import time
 from playwright.sync_api import sync_playwright
@@ -12,102 +15,80 @@ MAX_RETRIES = 3
 PAGE_TIMEOUT = 90000
 WAIT_AFTER_LOAD = 15
 
-# Streamlit Cloud sleeping page button texts (by priority)
-WAKE_BUTTON_TEXTS = [
-    "Yes, get this app back up!",
-    "Yes, get me out of here",
-    "Wake up",
-    "Wake this app",
-    "Get me out",
-    "Confirm",
-    "Yes",
-]
-
 print(f"Target URL: {url}")
 print(f"Max retries: {MAX_RETRIES}")
 
 
-def wait_for_wake_button(page, timeout=30000):
-    """Wait for the wake button to appear in the DOM, then click it."""
-    # Method 1: Wait for any button containing known wake text
-    for text in WAKE_BUTTON_TEXTS:
+def click_wake_button(page):
+    """Try to find and click the wake button using multiple methods."""
+    # Method 1: Playwright locator with known button texts
+    wake_texts = [
+        "Yes, get this app back up!",
+        "Yes, get me out of here",
+        "Wake up",
+        "Get me out",
+    ]
+    for text in wake_texts:
         try:
-            print(f'Waiting for button: "{text}" ...')
-            btn = page.locator(f'button:has-text("{text}")').first
-            btn.wait_for(state="visible", timeout=timeout // len(WAKE_BUTTON_TEXTS))
-            print(f'Found button: "{text}", clicking...')
-            btn.click()
-            return True
+            btn = page.locator(f'button:has-text("{text}")')
+            if btn.count() > 0 and btn.first.is_visible(timeout=3000):
+                print(f'Found and clicking button: "{text}"')
+                btn.first.click()
+                return True
         except Exception:
             continue
 
-    # Method 2: Wait for any clickable element with wake-related keywords
+    # Method 2: JavaScript DOM click (bypasses Playwright visibility checks)
     try:
-        print("Searching all elements for wake keywords...")
-        for selector in ['button', 'a', '[role="button"]', 'input[type="submit"]']:
-            page.locator(selector).first.wait_for(state="attached", timeout=5000)
-            elements = page.locator(selector).all()
-            for el in elements:
-                el_text = (el.text_content() or "").strip().lower()
-                if any(kw in el_text for kw in ["wake", "get me out", "get this app", "back up", "confirm", "yes"]):
-                    print(f'Found wake element: "{el.text_content().strip()}" ({selector}), clicking...')
-                    el.click()
-                    return True
-    except Exception:
-        pass
-
-    # Method 3: Click any non-trivial button on the page
-    try:
-        buttons = page.locator('button').all()
-        for btn in buttons:
-            btn_text = (btn.text_content() or "").strip()
-            if btn_text and btn_text not in ["Fork", "Main menu", ""] and len(btn_text) > 2:
-                print(f'Clicking primary button: "{btn_text}"')
-                btn.click()
-                return True
-    except Exception:
-        pass
-
-    # Method 4: Try JavaScript evaluation to find and click the button
-    try:
-        print("Trying JavaScript click...")
-        clicked = page.evaluate("""() => {
-            const buttons = document.querySelectorAll('button');
-            for (const btn of buttons) {
-                const text = btn.textContent.toLowerCase();
-                if (text.includes('yes') || text.includes('wake') || text.includes('get me') || text.includes('back up')) {
-                    btn.click();
-                    return btn.textContent.trim();
+        result = page.evaluate("""() => {
+            const all = document.querySelectorAll('button, a, [role="button"]');
+            for (const el of all) {
+                const t = (el.textContent || '').toLowerCase();
+                if (t.includes('yes') || t.includes('wake') ||
+                    t.includes('get me out') || t.includes('back up') ||
+                    t.includes('get this app')) {
+                    el.click();
+                    return el.textContent.trim();
                 }
             }
             return null;
         }""")
-        if clicked:
-            print(f'JavaScript clicked button: "{clicked}"')
+        if result:
+            print(f'JS clicked: "{result}"')
             return True
     except Exception:
         pass
 
-    print("No wake button found on the page.")
     return False
 
 
-def wait_for_app_loaded(page, timeout=60000):
-    """Wait for Streamlit app to fully load after wake."""
+def is_app_alive(page):
+    """Check if Streamlit app is actually running (not sleeping)."""
     try:
-        page.wait_for_selector('[data-testid="stApp"]', timeout=timeout)
-        print("Streamlit app loaded!")
-        return True
+        # Check for Streamlit app elements
+        if page.locator('[data-testid="stApp"]').count() > 0:
+            return True
+        if page.locator('iframe[title*="streamlit"]').count() > 0:
+            return True
+        if page.locator('#root iframe').count() > 0:
+            return True
     except Exception:
         pass
+    return False
 
-    try:
-        page.wait_for_selector('iframe', timeout=timeout)
-        print("Streamlit iframe detected.")
-        return True
-    except Exception:
-        pass
 
+def wait_for_wake_button_and_click(page, max_wait=60):
+    """Poll for the wake button to appear, then click it."""
+    print(f"Polling for wake button (max {max_wait}s)...")
+    start = time.time()
+    while time.time() - start < max_wait:
+        if click_wake_button(page):
+            return True
+        elapsed = int(time.time() - start)
+        if elapsed % 10 == 0 and elapsed > 0:
+            print(f"  Still waiting... ({elapsed}s)")
+        time.sleep(2)
+    print("Wake button never appeared.")
     return False
 
 
@@ -119,70 +100,80 @@ for attempt in range(1, MAX_RETRIES + 1):
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
 
+            # Use "load" instead of "domcontentloaded" to wait for all resources
             print(f"Navigating to {url} ...")
-            response = page.goto(url, timeout=PAGE_TIMEOUT, wait_until="domcontentloaded")
+            response = page.goto(url, timeout=PAGE_TIMEOUT, wait_until="load")
 
             status = response.status if response else "N/A"
             title = page.title()
             print(f"HTTP status: {status}")
             print(f"Page title: '{title}'")
 
-            # Wait for JavaScript rendering to complete
-            print("Waiting for page to fully render...")
+            # Wait for network to settle (React needs time to render)
             try:
                 page.wait_for_load_state("networkidle", timeout=30000)
+                print("Network idle reached.")
             except Exception:
-                pass
-            # Extra wait for JS rendering
-            time.sleep(8)
+                print("Network idle timeout, continuing...")
 
-            # Check if sleeping
-            content = page.content()
-            is_sleeping = any(kw in content.lower() for kw in [
-                "sleep", "zzz", "wake", "get me out", "hibernate",
-                "this app is asleep", "app has gone to sleep",
-                "get this app back up", "inactivity"
-            ])
+            # Extra time for React rendering
+            time.sleep(10)
 
-            if is_sleeping:
-                print("App is SLEEPING - attempting to wake it up...")
+            # MODE 1: Check if app is already alive (not sleeping)
+            if is_app_alive(page):
+                print("MODE 1: App is ALIVE - keeping it warm.")
+                time.sleep(WAIT_AFTER_LOAD)
+                browser.close()
+                browser = None
+                print(f"Keep-alive successful! (attempt {attempt})")
+                sys.exit(0)
 
-                # Wait for and click the wake button
-                clicked = wait_for_wake_button(page, timeout=30000)
-                if clicked:
-                    print("Wake button clicked! Waiting for app to start...")
-                    time.sleep(10)
+            # MODE 2: App might be sleeping - wait for React to render the wake button
+            print("MODE 2: App may be SLEEPING - waiting for wake button...")
 
-                    # Wait for app to load
-                    loaded = wait_for_app_loaded(page, timeout=60000)
-                    if loaded:
-                        print(f"Waiting {WAIT_AFTER_LOAD}s for initialization...")
-                        time.sleep(WAIT_AFTER_LOAD)
-                        print(f"Wake-up successful! (attempt {attempt})")
-                        browser.close()
-                        browser = None
-                        sys.exit(0)
-                    else:
-                        print("App did not fully load after clicking wake button.")
-                else:
-                    # Debug: print page content snippet
-                    snippet = content[:500].replace('\n', ' ')
-                    print(f"Could not find wake button. Page snippet: {snippet}")
-            else:
-                # App is not sleeping
-                loaded = wait_for_app_loaded(page, timeout=30000)
-                if loaded or (response and response.status == 200):
-                    print(f"Waiting {WAIT_AFTER_LOAD}s...")
+            clicked = wait_for_wake_button_and_click(page, max_wait=60)
+
+            if clicked:
+                print("Wake button clicked! Waiting for app to start...")
+                time.sleep(15)
+
+                # Wait for the app to fully load
+                try:
+                    page.wait_for_selector('[data-testid="stApp"]', timeout=60000)
+                    print("Streamlit app loaded!")
                     time.sleep(WAIT_AFTER_LOAD)
-                    print(f"App is already awake! (attempt {attempt})")
                     browser.close()
                     browser = None
+                    print(f"Wake-up successful! (attempt {attempt})")
                     sys.exit(0)
-                else:
-                    print(f"Unexpected status {status}, will retry...")
+                except Exception:
+                    # Even if stApp not found, check iframe
+                    try:
+                        page.wait_for_selector('iframe', timeout=10000)
+                        print("Streamlit iframe detected.")
+                        time.sleep(WAIT_AFTER_LOAD)
+                        browser.close()
+                        browser = None
+                        print(f"Wake-up successful! (attempt {attempt})")
+                        sys.exit(0)
+                    except Exception:
+                        print("App did not fully load after wake click.")
+            else:
+                # Could not find wake button - dump debug info
+                all_buttons = page.evaluate("""() => {
+                    const btns = document.querySelectorAll('button');
+                    return Array.from(btns).map(b => b.textContent.trim());
+                }""")
+                all_links = page.evaluate("""() => {
+                    const links = document.querySelectorAll('a');
+                    return Array.from(links).map(a => a.textContent.trim()).filter(t => t.length > 0);
+                }""")
+                print(f"Buttons found: {all_buttons}")
+                print(f"Links found: {all_links}")
+                print(f"URL after navigation: {page.url}")
 
     except Exception as e:
-        print(f"Attempt {attempt} failed: {e}")
+        print(f"Attempt {attempt} error: {e}")
     finally:
         if browser:
             try:
