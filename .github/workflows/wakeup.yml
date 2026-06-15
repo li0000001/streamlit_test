@@ -3,20 +3,19 @@ name: Wake Up Streamlit Apps
 on:
   schedule:
     - cron: '0 */4 * * *'
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   wake_up:
     runs-on: ubuntu-latest
-    timeout-minutes: 10 
-        env:
+    timeout-minutes: 10
+    env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
       fail-fast: false
       matrix:
         url:
           - "https://app-server-91132132.streamlit.app"
-          - "https://apptest-2osmliaqb4a5skcpnyxlgx.streamlit.app"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
