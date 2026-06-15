@@ -68,7 +68,6 @@ def try_click_wake_button(page):
     print("No wake button found on the page.")
     return False
 
-
 def wait_for_app_loaded(page, timeout=60000):
     """等待 Streamlit 应用真正加载完成"""
     try:
