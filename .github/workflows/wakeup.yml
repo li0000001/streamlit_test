@@ -17,7 +17,6 @@ jobs:
         url:
           - "https://app-server-91132132.streamlit.app"
           - "https://apptest-2osmliaqb4a5skcpnyxlgx.streamlit.app"
-          - "https://app-server-fntyqchym3xdmwrsyy3wxd.streamlit.app"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
