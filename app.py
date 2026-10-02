@@ -97,14 +97,22 @@ def generate_all_configs(domain, uuid_str, port, is_named_tunnel=False):
         # 命名隧道：域名固定，只生成直连 + 优选 IP 节点
         # Cloudflare 优选 IP（走 CDN）
         cf_endpoints = {
+            "2606:4700::": "443",
+            "www.visa.com": "443",
+            "japan.com": "443",
+            "www.iplocation.net": "443",
+            "time.is": "443",
+            "ip.sb": "443",
+            "openai.com": "443",
+            "openai.com": "443",
+            "openai.com": "443",
+            "saas.sin.fan": "443",
             "104.16.0.0": "443",
             "104.17.0.0": "8443",
             "104.18.0.0": "2053",
             "104.19.0.0": "2083",
             "104.20.0.0": "2087",
-            "162.159.0.0": "443",
-            "172.64.0.0": "443",
-            "188.114.96.0": "443",
+
         }
         for ip, p in cf_endpoints.items():
             all_links.append(generate_vless_link({
